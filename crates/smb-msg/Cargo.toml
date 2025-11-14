@@ -18,8 +18,8 @@ server = []
 both = ["client", "server"]
 
 [dependencies]
-smb-dtyp = { path = "../smb-dtyp", version = "0.10.3" }
-smb-fscc = { path = "../smb-fscc", version = "0.10.3" }
+smb-dtyp = { path = "../smb-dtyp", version = "0.10.4" }
+smb-fscc = { path = "../smb-fscc", version = "0.10.4" }
 
 binrw = { workspace = true }
 modular-bitfield = { workspace = true }
@@ -28,6 +28,5 @@ pastey = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-smb-msg = { path = ".", version = "0.10.2", features = ["both"] }
-smb-tests = { path = "../smb-tests", version = "0.10.2" }
+smb-tests = { path = "../smb-tests", version = "0.10.4" }
 const_format = { workspace = true }
