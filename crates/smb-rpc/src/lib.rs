@@ -3,10 +3,10 @@
 //! In an optimal world, this file would have been generated
 //! from IDLs.
 
+pub mod idl;
 pub mod interface;
 pub mod ndr64;
 pub mod pdu;
-pub mod idl;
 
 #[derive(thiserror::Error, Debug)]
 pub enum SmbRpcError {

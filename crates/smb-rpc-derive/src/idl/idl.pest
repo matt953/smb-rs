@@ -4,15 +4,17 @@ interface_header = { "[" ~ interface_attributes ~ "]" ~ "interface" ~ Identifier
 
 interface_attributes = { interface_attribute ~ ("," ~ interface_attribute)* }
 interface_attribute  = {
-    ("uuid" ~ "(" ~ Uuid_rep ~ ")")
-  | ("version" ~ "(" ~ Integer_literal ~ ("." ~ Integer_literal)? ~ ")")
-  | ("exceptions" ~ "(" ~ excep_name ~ ("," ~ excep_name)* ~ ")")
-  | ("local")
-  | ("pointer_default" ~ "(" ~ ptr_attr ~ ")")
-  | "ms_union" // MS-RPCE 2.2.4.5
+    uuid_attribute
+  | version_attribute
+  | pointer_default_attribute
+  | ms_union_attribute
 }
 
-excep_name = { Identifier }
+uuid_attribute = {"uuid" ~ "(" ~ Uuid_rep ~ ")"}
+version_attribute = { "version" ~ "(" ~ Integer_literal ~ ("." ~ Integer_literal)? ~ ")" }
+pointer_default_attribute = { "pointer_default" ~ "(" ~ ptr_attr ~ ")" }
+ms_union_attribute = { "ms_union" } // MS-RPCE 2.2.4.5
+
 ptr_attr   = {
     "ref"
   | "unique"
