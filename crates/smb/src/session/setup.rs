@@ -222,13 +222,11 @@ where
                 .channel
                 .is_some();
         let skip_security_validation = !is_auth_done && !channel_set_up;
-        if self.handler.is_some() {
+        if let Some(handler) = &self.handler {
             log::trace!(
                 "setup loop: receiving with channel handler; skip_security_validation={skip_security_validation}"
             );
-            self.handler
-                .as_ref()
-                .unwrap()
+            handler
                 .recvo_internal(roptions, skip_security_validation)
                 .await
         } else {
