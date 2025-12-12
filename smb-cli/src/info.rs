@@ -284,7 +284,7 @@ async fn handle_iteration_item(
             log::warn!(
                 "Failed to convert resource to directory {}: {}",
                 path_of_subdir,
-                e.0
+                e
             );
             return None;
         }

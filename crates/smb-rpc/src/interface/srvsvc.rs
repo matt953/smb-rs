@@ -1,5 +1,3 @@
-#![allow(unused_parens)]
-
 use crate::{interface::*, pdu::DceRpcSyntaxId};
 use smb_dtyp::make_guid;
 
@@ -106,7 +104,7 @@ pub struct ShareInfo0 {
 impl ShareInfo for ShareInfo0 {}
 impl ShareInfo for ShareInfo1 {}
 
-#[derive(BitfieldSpecifier, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Specifier, Debug, Clone, Copy, PartialEq, Eq)]
 #[bits = 2]
 pub enum ShareKind {
     Disk = 0,

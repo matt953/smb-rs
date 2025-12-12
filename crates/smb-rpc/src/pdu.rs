@@ -1,5 +1,4 @@
 //! DCE/RPC PDUs for connection-oriented RPC over SMB.
-#![allow(unused_parens)]
 
 use binrw::io::TakeSeekExt;
 use binrw::prelude::*;

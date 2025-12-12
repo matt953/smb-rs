@@ -14,7 +14,6 @@
 //! * Change notifications [`FileNotifyInformation`]
 //! * Access masks [`FileAccessMask`], [`DirAccessMask`]
 
-#![allow(unused_parens)]
 #![forbid(unsafe_code)]
 
 mod access_masks;

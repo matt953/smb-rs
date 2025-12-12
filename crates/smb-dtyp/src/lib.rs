@@ -1,7 +1,6 @@
 //! Windows Data Type (MS-DTYP) for SMB
 
 #![forbid(unsafe_code)]
-#![allow(unused_parens)]
 
 pub mod binrw_util;
 pub mod guid;

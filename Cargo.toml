@@ -31,7 +31,7 @@ smb-transport = { path = "crates/smb-transport", version = "=0.11.1", default-fe
 
 # Binary encoding/decoding
 binrw = "0.15.0"
-modular-bitfield = "0.11.2"
+modular-bitfield = "0.13.1"
 
 # Utilities
 thiserror = "2.0"
@@ -39,6 +39,8 @@ pastey = "0.1.1"
 time = { version = "0.3.37", features = ["macros"] }
 rand = "0.8.5"
 log = "0.4.22"
+derive_builder = "0.20.2"
+
 # Tests
 const_format = "0.2"
 

@@ -281,7 +281,7 @@ pub struct TreeConnectResponse {
 }
 
 /// Share caching mode for offline file access
-#[derive(BitfieldSpecifier, Debug, Clone, Copy)]
+#[derive(Specifier, Debug, Clone, Copy)]
 #[bits = 4]
 pub enum ShareCacheMode {
     /// Manual caching - client can cache files explicitly selected by user

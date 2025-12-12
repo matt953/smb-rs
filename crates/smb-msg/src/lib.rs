@@ -1,6 +1,5 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
-#![allow(unused_parens)]
 
 pub mod cancel;
 pub mod compressed;

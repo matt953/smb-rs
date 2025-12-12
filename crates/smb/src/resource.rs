@@ -190,66 +190,49 @@ impl Resource {
         };
         Ok(resource)
     }
-
-    pub fn as_file(&self) -> Option<&File> {
-        match self {
-            Resource::File(f) => Some(f),
-            _ => None,
-        }
-    }
-
-    pub fn as_dir(&self) -> Option<&Directory> {
-        match self {
-            Resource::Directory(d) => Some(d),
-            _ => None,
-        }
-    }
-
-    pub fn is_file(&self) -> bool {
-        self.as_file().is_some()
-    }
-
-    pub fn is_dir(&self) -> bool {
-        self.as_dir().is_some()
-    }
-
-    pub fn unwrap_file(self) -> File {
-        match self {
-            Resource::File(f) => f,
-            _ => panic!("Not a file"),
-        }
-    }
-
-    pub fn unwrap_dir(self) -> Directory {
-        match self {
-            Resource::Directory(d) => d,
-            _ => panic!("Not a directory"),
-        }
-    }
 }
 
-/// Generates TryInto implementations for Resource enum variants.
-macro_rules! make_resource_try_into {
-    (
-        $($t:ident,)+
-    ) => {
-        $(
+macro_rules! resource_variant_impl {
+    ($val:ident) => {
+        pastey::paste! {
+            impl Resource {
+                pub fn [<unwrap_ $val:snake>](self) -> $val {
+                    match self {
+                        Resource::$val(v) => v,
+                        _ => panic!(concat!("Not a ", stringify!($val))),
+                    }
+                }
 
-impl TryInto<$t> for Resource {
-    type Error = (crate::Error, Self);
+                pub fn [<as_ $val:snake>](&self) -> Option<&$val> {
+                    match self {
+                        Resource::$val(v) => Some(v),
+                        _ => None,
+                    }
+                }
 
-    fn try_into(self) -> Result<$t, Self::Error> {
-        match self {
-            Resource::$t(f) => Ok(f),
-            x => Err((Error::InvalidArgument(format!("Not a {}", stringify!($t))), x)),
+                pub fn [<is_ $val:snake>](&self) -> bool {
+                    matches!(self, Resource::$val(_))
+                }
+            }
+
+            impl TryInto<$val> for Resource {
+                type Error = crate::Error;
+
+                fn try_into(self) -> Result<$val, Self::Error> {
+                    match self {
+                        Resource::$val(f) => Ok(f),
+                        _ => Err(Error::InvalidArgument(format!("Not a {}", stringify!($val)))),
+                    }
+                }
+            }
         }
-    }
-}
-        )+
     };
+    ($($val:ident, )+) => {
+        $(resource_variant_impl!($val);)+
+    }
 }
 
-make_resource_try_into!(File, Directory, Pipe,);
+resource_variant_impl!(File, Directory, Pipe,);
 
 /// Holds the common information for an opened SMB resource.
 pub struct ResourceHandle {

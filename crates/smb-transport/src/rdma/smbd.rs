@@ -1,4 +1,3 @@
-#![allow(unused_parens)]
 #![allow(dead_code)] // not all structures' features are implemented yet.
 
 //! SMB-Direct (SMBD) packets & structures

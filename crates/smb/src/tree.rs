@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use maybe_async::*;
 use smb_msg::{FileId, FsctlRequest, IoctlRequest, IoctlRequestFlags};
 
-use crate::FileCreateArgs;
 use crate::connection::connection_info::ConnectionInfo;
+use crate::{Directory, FileCreateArgs};
 use smb_fscc::{FileAccessMask, FileAttributes};
 use smb_msg::{
     CreateOptions, RequestContent, ShareFlags, ShareType,
@@ -144,7 +144,7 @@ impl Tree {
         file_name: &str,
         disposition: CreateDisposition,
         desired_access: FileAccessMask,
-    ) -> crate::Result<Resource> {
+    ) -> crate::Result<crate::File> {
         self.create(
             file_name,
             &FileCreateArgs {
@@ -154,7 +154,8 @@ impl Tree {
                 attributes: FileAttributes::new(),
             },
         )
-        .await
+        .await?
+        .try_into()
     }
 
     /// A wrapper around [Tree::create] that creates a directory on the remote server.
@@ -164,7 +165,7 @@ impl Tree {
         dir_name: &str,
         disposition: CreateDisposition,
         desired_access: FileAccessMask,
-    ) -> crate::Result<Resource> {
+    ) -> crate::Result<Directory> {
         self.create(
             dir_name,
             &FileCreateArgs {
@@ -174,7 +175,8 @@ impl Tree {
                 attributes: FileAttributes::new().with_directory(true),
             },
         )
-        .await
+        .await?
+        .try_into()
     }
 
     /// A wrapper around [create][crate::tree::Tree::create] that opens an existing file or directory on the remote server.
@@ -277,7 +279,7 @@ impl TreeMessageHandler {
     async fn _disconnect(upstream: Upstream, tree_id: u32, encrypt: bool) -> crate::Result<()> {
         // send and receive tree disconnect request & response.
         let request_content: RequestContent = TreeDisconnectRequest::default().into();
-        let mut message = OutgoingMessage::new(request_content).with_encrypt(encrypt);
+        let mut message = OutgoingMessage::default()(request_content).with_encrypt(encrypt);
         message.message.header.tree_id = Some(tree_id);
 
         let _response = upstream.sendo_recv(message).await?;

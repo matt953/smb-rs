@@ -5,10 +5,11 @@ use proc_macro::TokenStream;
 ///
 /// Adds derives for `Debug`, `Default`, `Clone`, `Copy`, `PartialEq`, and `Eq`.
 #[proc_macro_attribute]
-pub fn mbitfield(_attr: TokenStream, input: TokenStream) -> TokenStream {
+pub fn mbitfield(attr: TokenStream, input: TokenStream) -> TokenStream {
+    let attr = proc_macro2::TokenStream::from(attr);
     let input = syn::parse_macro_input!(input as syn::ItemStruct);
     quote::quote! {
-        #[::modular_bitfield::bitfield]
+        #[::modular_bitfield::bitfield(#attr)]
         #[derive(::binrw::BinWrite, ::binrw::BinRead)]
         #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
         #[bw(map = |&x| Self::into_bytes(x))]
