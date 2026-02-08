@@ -23,32 +23,43 @@ impl AsyncBackend {
         mut rtransport: Box<dyn SmbTransportRead>,
         worker: Arc<ParallelWorker<Self>>,
     ) {
-        log::debug!("Starting worker loop.");
+        log::debug!("Starting receive loop");
         let self_ref = self.as_ref();
+        let mut msg_count: u64 = 0;
+
         loop {
             match self_ref
                 .handle_next_recv(rtransport.as_mut(), &worker)
                 .await
             {
-                Ok(_) => {}
+                Ok(_) => {
+                    msg_count += 1;
+                }
                 Err(Error::TransportError(TransportError::NotConnected)) => {
-                    log::error!("Connection was force-closed by the server.");
+                    log::error!("Connection force-closed after {} messages", msg_count);
                     self_ref.token.cancel();
                     break;
                 }
                 Err(Error::ConnectionStopped) => {
+                    log::debug!("Connection stopped gracefully after {} messages", msg_count);
+                    break;
+                }
+                Err(Error::TransportError(TransportError::Timeout(_))) => {
+                    log::error!("Transport timeout after {} messages - treating as connection dead", msg_count);
+                    self_ref.token.cancel();
                     break;
                 }
                 Err(e) => {
-                    log::error!("Error in worker loop: {e}");
+                    log::error!("Receive error after {} messages: {:?}", msg_count, e);
                 }
             }
         }
 
-        // Cleanup
-        log::debug!("Cleaning up worker loop.");
+        // Cleanup: notify awaiting tasks
+        log::debug!("Receive loop cleanup, notifying awaiting tasks");
         if let Ok(mut state) = worker.state.lock().await {
-            for (_, tx) in state.awaiting.drain() {
+            for (msg_id, tx) in state.awaiting.drain() {
+                log::trace!("Notifying awaiting task {} of connection stop", msg_id);
                 let _notify_result = tx.send(Err(Error::ConnectionStopped));
             }
         }
@@ -60,28 +71,34 @@ impl AsyncBackend {
         mut send_channel: mpsc::Receiver<IoVec>,
         worker: Arc<ParallelWorker<Self>>,
     ) {
-        log::debug!("Starting worker loop.");
+        log::debug!("Starting send loop");
         let self_ref = self.as_ref();
+        let mut msg_count: u64 = 0;
+
         loop {
             match self_ref
                 .handle_next_send(wtransport.as_mut(), &mut send_channel, &worker)
                 .await
             {
-                Ok(_) => {}
+                Ok(_) => {
+                    msg_count += 1;
+                }
                 Err(Error::TransportError(TransportError::NotConnected)) => {
-                    log::error!("Connection was force-closed by the server.");
+                    log::error!("Connection force-closed after {} messages", msg_count);
                     self_ref.token.cancel();
                     break;
                 }
                 Err(Error::ConnectionStopped) => {
+                    log::debug!("Connection stopped gracefully after {} messages", msg_count);
                     break;
                 }
                 Err(e) => {
-                    log::error!("Error in worker loop: {e}",);
+                    log::error!("Send error after {} messages: {:?}", msg_count, e);
                 }
             }
         }
 
+        log::debug!("Closing send channel");
         send_channel.close();
     }
 
@@ -96,13 +113,16 @@ impl AsyncBackend {
         worker: &Arc<ParallelWorker<Self>>,
     ) -> crate::Result<()> {
         select! {
-            // Receive a message from the server.
-            message_from_server = rtransport.receive() => {
-                worker.incoming_data_callback(message_from_server).await
-            }
+            biased;
+
             // Cancel the loop.
             _ = self.token.cancelled() => {
                 Err(Error::ConnectionStopped)
+            }
+
+            // Receive a message from the server.
+            message_from_server = rtransport.receive() => {
+                worker.incoming_data_callback(message_from_server).await
             }
         }
     }

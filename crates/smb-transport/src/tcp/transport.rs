@@ -77,18 +77,25 @@ impl TcpTransport {
     /// using the [tokio::net::TcpStream] as the underlying socket provider.
     #[cfg(feature = "async")]
     async fn connect_timeout(&mut self, endpoint: &SocketAddr) -> Result<TcpStream> {
-        if self.timeout == Duration::ZERO {
+        let socket = if self.timeout == Duration::ZERO {
             log::debug!("Connecting to {endpoint}.",);
-            return TcpStream::connect(&endpoint).await.map_err(Into::into);
-        }
+            TcpStream::connect(&endpoint).await?
+        } else {
+            log::debug!("Connecting to {endpoint} with timeout {:?}.", self.timeout);
+            let socket = select! {
+                res = TcpStream::connect(&endpoint) => res?,
+                _ = tokio::time::sleep(self.timeout) => return Err(
+                    TransportError::Timeout(self.timeout)
+                ),
+            };
+            socket
+        };
 
-        log::debug!("Connecting to {endpoint} with timeout {:?}.", self.timeout);
-        select! {
-            res = TcpStream::connect(&endpoint) => res.map_err(Into::into),
-            _ = tokio::time::sleep(self.timeout) => Err(
-                TransportError::Timeout(self.timeout)
-            ),
-        }
+        // Configure socket for high-throughput SMB traffic
+        socket.set_nodelay(true)?; // Disable Nagle's algorithm for lower latency
+        log::debug!("Socket configured: nodelay=true");
+
+        Ok(socket)
     }
 
     /// Async implementation of split socket to read and write halves.
@@ -138,25 +145,33 @@ impl TcpTransport {
     #[inline]
     async fn receive_exact(&mut self, out_buf: &mut [u8]) -> Result<()> {
         let reader = self.reader.as_mut().ok_or(TransportError::NotConnected)?;
-        log::trace!("Reading {} bytes.", out_buf.len());
-        reader
-            .read_exact(out_buf)
-            .await
-            .map_err(Self::map_tcp_error)?;
-        log::trace!("Read {} bytes OK.", out_buf.len());
-        Ok(())
+
+        // Use a 30-second timeout to detect stuck connections
+        const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+        let result = tokio::time::timeout(READ_TIMEOUT, reader.read_exact(out_buf)).await;
+
+        match result {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(Self::map_tcp_error(e)),
+            Err(_) => Err(TransportError::Timeout(READ_TIMEOUT)),
+        }
     }
 
     #[maybe_async::maybe_async]
     #[inline]
     async fn send_raw(&mut self, message: &[u8]) -> Result<()> {
-        log::trace!("Sending {} bytes.", message.len());
         let writer = self.writer.as_mut().ok_or(TransportError::NotConnected)?;
-        writer
-            .write_all(message)
-            .await
-            .map_err(Self::map_tcp_error)?;
-        Ok(())
+
+        // Add timeout to sends
+        const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        let result = tokio::time::timeout(SEND_TIMEOUT, writer.write_all(message)).await;
+
+        match result {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(Self::map_tcp_error(e)),
+            Err(_) => Err(TransportError::Timeout(SEND_TIMEOUT)),
+        }
     }
 
     #[maybe_async::maybe_async]

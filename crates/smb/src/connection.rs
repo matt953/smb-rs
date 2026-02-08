@@ -615,7 +615,15 @@ impl ConnectionMessageHandler {
 
                 // First, acquire credits from the semaphore, and forget them.
                 // They may be returned via the response message, at `process_sequence_incoming` below.
+                let acquire_start = std::time::Instant::now();
+                let available_before = self.curr_credits.available_permits();
+                let pool_before = self.credit_pool.load(Ordering::SeqCst);
                 self.curr_credits.acquire_many(cost as u32).await?.forget();
+                let acquire_elapsed = acquire_start.elapsed();
+                if acquire_elapsed.as_millis() > 10 {
+                    log::warn!("[CREDITS] acquire_many({}) took {:?} - available before: {}, pool before: {}, pool after: {}",
+                        cost, acquire_elapsed, available_before, pool_before, self.credit_pool.load(Ordering::SeqCst));
+                }
 
                 let mut request = cost;
                 // Request additional credits if required: if balance < extra, add to request the diff:
@@ -661,6 +669,7 @@ impl ConnectionMessageHandler {
             if neg.negotiation.caps.large_mtu() {
                 let granted_credits = msg.message.header.credit_request;
                 let charged_credits = msg.message.header.credit_charge;
+
                 // Update the pool size - return how many EXTRA credits were granted.
                 // also, handle the case where the server granted less credits than charged.
                 if charged_credits > granted_credits {
@@ -671,8 +680,25 @@ impl ConnectionMessageHandler {
                         .fetch_add(granted_credits - charged_credits, Ordering::SeqCst);
                 }
 
+                // CRITICAL FIX: When server grants zero credits, we must still return
+                // at least the charged credits to prevent deadlock. The server is under
+                // pressure but we need to keep the pipeline moving.
+                let credits_to_return = if granted_credits == 0 {
+                    // Server is overwhelmed - return charged credits to allow continued operation
+                    // but don't add extra (server isn't granting any)
+                    charged_credits as usize
+                } else {
+                    granted_credits as usize
+                };
+
                 // Return the credits to the pool.
-                self.curr_credits.add_permits(granted_credits as usize);
+                self.curr_credits.add_permits(credits_to_return);
+
+                // Credit logging - reduced verbosity since zero-credits are now handled gracefully
+                if granted_credits == 0 {
+                    log::trace!("[CREDITS] msg_id={} server granted zero credits, returning {} charged",
+                        msg.message.header.message_id, charged_credits);
+                }
                 return Ok(());
             }
         }
