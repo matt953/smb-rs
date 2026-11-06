@@ -653,6 +653,8 @@ impl ConnectionMessageHandler {
         Command::Write,
         Command::Ioctl,
         Command::QueryDirectory,
+        Command::ChangeNotify,
+        Command::QueryInfo,
     ];
 
     const CREDIT_CALC_RATIO: u32 = 65536;

@@ -268,6 +268,11 @@ impl RequestContent {
             Read(req) => req.length,
             // 3.3.5.18
             QueryDirectory(req) => req.output_buffer_length,
+            // 3.3.5.19: a CHANGE_NOTIFY is charged for its OutputBufferLength
+            // (Samba answers STATUS_INVALID_PARAMETER to a 128 KiB notify charged 1).
+            ChangeNotify(req) => req.output_buffer_length,
+            // 3.3.5.20.1
+            QueryInfo(req) => req.output_buffer_length,
             // 3.3.5.15: MaxInputCount + MaxOutputCount
             Ioctl(req) => req.max_input_response + req.max_output_response,
             _ => 0,
