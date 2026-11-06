@@ -57,6 +57,15 @@ impl FromStr for NdrString<u16, 0> {
     }
 }
 
+impl<const SIZE: u32> NdrString<u16, SIZE> {
+    /// The text, decoded as UTF-16 (non-ASCII names intact), without the
+    /// terminating NUL. `Display` keeps its old byte-per-unit form.
+    pub fn to_string_lossy(&self) -> String {
+        let units: Vec<u16> = self.data.value.iter().copied().take_while(|&c| c != 0).collect();
+        String::from_utf16_lossy(&units)
+    }
+}
+
 impl<const SIZE: u32> Display for NdrString<u16, SIZE> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s: String = self.data.value.iter().map(|&c| c as u8 as char).collect();

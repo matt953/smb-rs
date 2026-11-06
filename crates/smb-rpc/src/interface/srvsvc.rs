@@ -180,6 +180,12 @@ where
 {
     #[maybe_async]
     pub async fn netr_share_enum(&mut self, server_name: &str) -> crate::Result<Vec<ShareInfo1>> {
+        // A server that bound NDR20 only (Samba: TrueNAS, Synology, QNAP).
+        if self.bound_pipe.transfer_syntax() == Some(super::srvsvc_ndr20::NDR20_SYNTAX_ID) {
+            let stub = super::srvsvc_ndr20::netr_share_enum_request(server_name);
+            let out = self.bound_pipe.send_receive_raw(super::srvsvc_ndr20::NETR_SHARE_ENUM, &stub).await?;
+            return super::srvsvc_ndr20::netr_share_enum_response(&out);
+        }
         let input_struct = NetrShareEnumIn {
             server_name: NdrPtr::from(server_name.parse::<NdrString<u16>>().unwrap()).into(),
             info_struct: ShareEnumStruct {

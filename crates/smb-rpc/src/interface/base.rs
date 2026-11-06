@@ -43,4 +43,10 @@ pub trait BoundRpcConnection {
     }
 
     async fn send_receive_raw(&mut self, opnum: u16, stub_input: &[u8]) -> crate::Result<Vec<u8>>;
+
+    /// The transfer syntax the bind settled on; `None` means NDR64 (what
+    /// every interface's binrw types encode).
+    fn transfer_syntax(&self) -> Option<DceRpcSyntaxId> {
+        None
+    }
 }

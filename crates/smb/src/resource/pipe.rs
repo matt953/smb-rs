@@ -7,7 +7,10 @@ use super::ResourceHandle;
 use crate::msg_handler::{OutgoingMessage, ReceiveOptions};
 use maybe_async::*;
 use smb_msg::{IoctlBuffer, PipeTransceiveRequest, ReadRequest, WriteRequest};
-use smb_rpc::{SmbRpcError, interface::*, ndr64::NDR64_SYNTAX_ID, pdu::*};
+use smb_rpc::{
+    SmbRpcError, interface::*, interface::srvsvc_ndr20::NDR20_SYNTAX_ID, ndr64::NDR64_SYNTAX_ID,
+    pdu::*,
+};
 pub struct Pipe {
     handle: ResourceHandle,
 }
@@ -31,6 +34,8 @@ pub struct PipeRpcConnection {
     next_call_id: u32,
     /// Selected, accepted, context ID from binding.
     context_id: u16,
+    /// The transfer syntax of that context (NDR64, or NDR20 for Samba).
+    syntax: DceRpcSyntaxId,
 
     server_max_xmit_frag: u16,
     _server_max_recv_frag: u16,
@@ -42,7 +47,10 @@ impl PipeRpcConnection {
     where
         I: RpcInterface<PipeRpcConnection>,
     {
-        let tranfer_syntaxes: [DceRpcSyntaxId; 2] = [NDR64_SYNTAX_ID, BIND_TIME_NEGOTIATION];
+        // NDR64 first (Windows), NDR20 too (Samba binds only that), and
+        // bind-time feature negotiation. The first accepted one is used.
+        let tranfer_syntaxes: [DceRpcSyntaxId; 3] =
+            [NDR64_SYNTAX_ID, NDR20_SYNTAX_ID, BIND_TIME_NEGOTIATION];
         let context_elements = Self::make_bind_contexts(I::SYNTAX_ID, &tranfer_syntaxes);
 
         const START_CALL_ID: u32 = 2;
@@ -75,10 +83,13 @@ impl PipeRpcConnection {
 
         let context_id = Self::check_bind_results(bind_ack, &tranfer_syntaxes)?;
 
+        let syntax = tranfer_syntaxes[context_id as usize].clone();
+        log::debug!("Bound with transfer syntax {syntax}");
         Ok(I::new(PipeRpcConnection {
             pipe,
             next_call_id: START_CALL_ID + 1,
             context_id,
+            syntax,
             server_max_xmit_frag: bind_ack.max_xmit_frag,
             _server_max_recv_frag: bind_ack.max_recv_frag,
         }))
@@ -128,10 +139,11 @@ impl PipeRpcConnection {
                 );
                 continue;
             }
+            // A syntax the server refused (Samba refuses NDR64): another
+            // offered one may be accepted.
             if ack_context.result != DceRpcCoPktBindAckDefResult::Acceptance {
-                return Err(crate::Error::InvalidMessage(format!(
-                    "BindAck result for syntax {syntax} was not acceptance: {ack_context:?}"
-                )));
+                log::debug!("BindAck refused syntax {syntax}: {ack_context:?}");
+                continue;
             }
             if &ack_context.syntax != syntax {
                 return Err(crate::Error::InvalidMessage(format!(
@@ -139,7 +151,10 @@ impl PipeRpcConnection {
                     ack_context.syntax, syntax
                 )));
             }
-            context_id_selected = Some(indx as u16);
+            // The first accepted one, in the order offered.
+            if context_id_selected.is_none() {
+                context_id_selected = Some(indx as u16);
+            }
         }
 
         if let Some(context_id) = context_id_selected {
@@ -303,6 +318,10 @@ impl BoundRpcConnection for PipeRpcConnection {
         }
 
         Ok(response.stub_data)
+    }
+
+    fn transfer_syntax(&self) -> Option<DceRpcSyntaxId> {
+        Some(self.syntax.clone())
     }
 }
 
