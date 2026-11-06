@@ -40,8 +40,22 @@ pub fn make_transport(
     transport: &TransportConfig,
     timeout: Duration,
 ) -> Result<Box<dyn SmbTransport>, TransportError> {
+    make_transport_with_io(transport, timeout, IoTimeouts::default())
+}
+
+/// Like [`make_transport`], with explicit I/O timeouts for TCP.
+/// Other transports keep their own I/O behaviour.
+pub fn make_transport_with_io(
+    transport: &TransportConfig,
+    timeout: Duration,
+    io_timeouts: IoTimeouts,
+) -> Result<Box<dyn SmbTransport>, TransportError> {
+    let _ = &io_timeouts;
     match transport {
-        TransportConfig::Tcp => Ok(Box::new(tcp::TcpTransport::new(timeout))),
+        TransportConfig::Tcp => Ok(Box::new(tcp::TcpTransport::with_io_timeouts(
+            timeout,
+            io_timeouts,
+        ))),
 
         #[cfg(feature = "netbios-transport")]
         TransportConfig::NetBios => Ok(Box::new(NetBiosTransport::new(timeout))),

@@ -1,3 +1,4 @@
+use crate::config::IoTimeouts;
 use crate::error::*;
 use crate::{SmbTransport, SmbTransportRead, SmbTransportWrite};
 
@@ -36,16 +37,26 @@ pub struct TcpTransport {
     reader: Option<TcpRead>,
     writer: Option<TcpWrite>,
     timeout: Duration,
+    io_timeouts: IoTimeouts,
 }
 
 impl TcpTransport {
     pub const DEFAULT_PORT: u16 = 445;
 
+    /// A TCP transport with the legacy I/O timeouts ([`IoTimeouts::default`]):
+    /// 30 s for any single receive or send, idle waits included.
     pub fn new(timeout: Duration) -> TcpTransport {
+        Self::with_io_timeouts(timeout, IoTimeouts::default())
+    }
+
+    /// A TCP transport with explicit I/O timeouts.
+    /// `timeout` is the connect timeout; `io_timeouts` bounds each receive and send.
+    pub fn with_io_timeouts(timeout: Duration, io_timeouts: IoTimeouts) -> TcpTransport {
         TcpTransport {
             reader: None,
             writer: None,
             timeout,
+            io_timeouts,
         }
     }
 
@@ -141,37 +152,53 @@ impl TcpTransport {
         e.into()
     }
 
-    #[maybe_async]
+    /// Receives exactly `out_buf.len()` bytes.
+    ///
+    /// The receive loop waits here between messages too, so `idle_read` bounds
+    /// idle waits. `IoTimeouts::idle_read == None` waits forever, leaving
+    /// dead-peer detection to per-request timeouts and keep-alives.
+    #[cfg(feature = "async")]
     #[inline]
     async fn receive_exact(&mut self, out_buf: &mut [u8]) -> Result<()> {
         let reader = self.reader.as_mut().ok_or(TransportError::NotConnected)?;
-
-        // Use a 30-second timeout to detect stuck connections
-        const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-        let result = tokio::time::timeout(READ_TIMEOUT, reader.read_exact(out_buf)).await;
-
-        match result {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(e)) => Err(Self::map_tcp_error(e)),
-            Err(_) => Err(TransportError::Timeout(READ_TIMEOUT)),
-        }
+        let result = match self.io_timeouts.idle_read {
+            Some(t) if !t.is_zero() => tokio::time::timeout(t, reader.read_exact(out_buf))
+                .await
+                .map_err(|_| TransportError::Timeout(t))?,
+            _ => reader.read_exact(out_buf).await,
+        };
+        result.map(|_| ()).map_err(Self::map_tcp_error)
     }
 
-    #[maybe_async::maybe_async]
+    /// Sync builds: the worker sets the socket's own read timeout.
+    #[cfg(not(feature = "async"))]
+    #[inline]
+    fn receive_exact(&mut self, out_buf: &mut [u8]) -> Result<()> {
+        let reader = self.reader.as_mut().ok_or(TransportError::NotConnected)?;
+        reader.read_exact(out_buf).map_err(Self::map_tcp_error)
+    }
+
+    #[cfg(feature = "async")]
     #[inline]
     async fn send_raw(&mut self, message: &[u8]) -> Result<()> {
         let writer = self.writer.as_mut().ok_or(TransportError::NotConnected)?;
+        let result = match self.io_timeouts.send {
+            Some(t) if !t.is_zero() => tokio::time::timeout(t, writer.write_all(message))
+                .await
+                .map_err(|_| TransportError::Timeout(t))?,
+            _ => writer.write_all(message).await,
+        };
+        result.map_err(Self::map_tcp_error)
+    }
 
-        // Add timeout to sends
-        const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-        let result = tokio::time::timeout(SEND_TIMEOUT, writer.write_all(message)).await;
-
-        match result {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(e)) => Err(Self::map_tcp_error(e)),
-            Err(_) => Err(TransportError::Timeout(SEND_TIMEOUT)),
+    #[cfg(not(feature = "async"))]
+    #[inline]
+    fn send_raw(&mut self, message: &[u8]) -> Result<()> {
+        let writer = self.writer.as_mut().ok_or(TransportError::NotConnected)?;
+        if let Some(t) = self.io_timeouts.send.filter(|t| !t.is_zero()) {
+            writer.set_write_timeout(Some(t))?;
         }
+        writer.write_all(message).map_err(Self::map_tcp_error)
     }
 
     #[maybe_async::maybe_async]
@@ -205,11 +232,13 @@ impl SmbTransport for TcpTransport {
                 reader: self.reader,
                 writer: None,
                 timeout: self.timeout,
+                io_timeouts: self.io_timeouts,
             }),
             Box::new(Self {
                 reader: None,
                 writer: self.writer,
                 timeout: self.timeout,
+                io_timeouts: self.io_timeouts,
             }),
         ))
     }

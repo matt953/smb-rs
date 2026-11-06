@@ -169,6 +169,26 @@ impl Directory {
         iter_stream::QueryDirectoryStream::new(this, pattern.to_string(), buffer_size).await
     }
 
+    /// Lists the whole directory: sends QUERY_DIRECTORY repeatedly, following
+    /// continuation until the server answers STATUS_NO_MORE_FILES, and returns
+    /// every entry. Errors on any page are returned (no partial list).
+    #[cfg(feature = "async")]
+    pub async fn query_all<T>(this: &Arc<Self>, pattern: &str) -> crate::Result<Vec<T>>
+    where
+        T: QueryDirectoryInfoValue + for<'b> binrw::prelude::BinWrite<Args<'b> = ()> + Send,
+    {
+        let buffer_size = Self::QUERY_DIRECTORY_DEFAULT_BUFFER_SIZE
+            .min(this.conn_info.negotiation.max_transact_size);
+        let _guard = this.query_lock.lock().await?;
+        let mut is_first = true;
+        drain_pages(|| {
+            let restart = is_first;
+            is_first = false;
+            this.send_query::<T>(pattern, restart, buffer_size)
+        })
+        .await
+    }
+
     /// Synchronously iterates over the directory contents, using the provided pattern and information type.
     /// # Arguments
     /// * `pattern` - The pattern to match against the file names in the directory. Use wildcards like `*` and `?` to match multiple files.
@@ -700,37 +720,37 @@ pub mod iter_stream {
             pattern: String,
             buffer_size: u32,
             sender: mpsc::Sender<crate::Result<T>>,
-            notify_fetch_next: Arc<tokio::sync::Notify>,
+            _notify_fetch_next: Arc<tokio::sync::Notify>,
         ) {
+            // Follow continuation until the server answers STATUS_NO_MORE_FILES
+            // (an empty page). One QUERY_DIRECTORY often returns only part of a
+            // folder (498 of 770 entries on a TrueNAS share). The bounded channel
+            // gives back-pressure, so at most one page is fetched ahead. An error
+            // ends the stream: retrying the same handle would repeat it forever.
+            //
+            // (The earlier version waited on `Notify::notify_waiters`, which drops
+            // a wake-up sent before the loop starts waiting, so a fast consumer
+            // could leave the stream hanging at a page boundary.)
             let mut is_first = true;
             loop {
                 let result = directory
                     .send_query::<T>(&pattern, is_first, buffer_size)
                     .await;
                 is_first = false;
-
-                match result {
-                    Ok(items) => {
-                        if items.is_empty() {
-                            // No more files, exit the loop
-                            break;
-                        }
+                match next_page_action(result) {
+                    PageAction::Done => break,
+                    PageAction::Items(items) => {
                         for item in items {
                             if sender.send(Ok(item)).await.is_err() {
                                 return; // Receiver dropped
                             }
                         }
                     }
-                    Err(e) => {
-                        if sender.send(Err(e)).await.is_err() {
-                            return; // Receiver dropped
-                        }
+                    PageAction::Fail(e) => {
+                        let _ = sender.send(Err(e)).await;
+                        return;
                     }
                 }
-
-                // Notify the stream that a new batch is available
-                notify_fetch_next.notify_waiters();
-                notify_fetch_next.notified().await;
             }
         }
     }
@@ -1036,3 +1056,100 @@ mod iter_mtd {
 
 #[cfg(feature = "multi_threaded")]
 pub use iter_mtd::{NotifyDirectoryIteratorCancellable, NotifyDirectoryIteratorCanceller};
+
+
+/// What to do with one QUERY_DIRECTORY answer.
+pub(crate) enum PageAction<T> {
+    /// STATUS_NO_MORE_FILES (an empty page): the listing is complete.
+    Done,
+    /// More entries; ask again with the same handle.
+    Items(Vec<T>),
+    /// Stop with this error.
+    Fail(crate::Error),
+}
+
+pub(crate) fn next_page_action<T>(page: crate::Result<Vec<T>>) -> PageAction<T> {
+    match page {
+        Ok(items) if items.is_empty() => PageAction::Done,
+        Ok(items) => PageAction::Items(items),
+        Err(e) => PageAction::Fail(e),
+    }
+}
+
+/// Calls `fetch` until it returns an empty page, collecting every entry.
+#[cfg(feature = "async")]
+pub(crate) async fn drain_pages<T, F, Fut>(mut fetch: F) -> crate::Result<Vec<T>>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = crate::Result<Vec<T>>>,
+{
+    let mut all = Vec::new();
+    loop {
+        match next_page_action(fetch().await) {
+            PageAction::Done => return Ok(all),
+            PageAction::Items(items) => all.extend(items),
+            PageAction::Fail(e) => return Err(e),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "async"))]
+mod pagination_tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    fn pages(sizes: &[usize]) -> VecDeque<crate::Result<Vec<u32>>> {
+        let mut n = 0u32;
+        sizes
+            .iter()
+            .map(|&k| {
+                let page: Vec<u32> = (n..n + k as u32).collect();
+                n += k as u32;
+                Ok(page)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn follows_continuation_until_no_more_files() {
+        // The NAS answered 498 entries first, then the rest, then NO_MORE_FILES.
+        let mut q = pages(&[498, 272, 0]);
+        let mut calls = 0;
+        let all = drain_pages(|| {
+            calls += 1;
+            let next = q.pop_front().unwrap();
+            async move { next }
+        })
+        .await
+        .unwrap();
+        assert_eq!(all.len(), 770);
+        assert_eq!(calls, 3);
+        assert_eq!(all, (0..770).collect::<Vec<u32>>());
+    }
+
+    #[tokio::test]
+    async fn empty_directory_is_one_call() {
+        let mut q = pages(&[0]);
+        let all = drain_pages(|| {
+            let next = q.pop_front().unwrap();
+            async move { next }
+        })
+        .await
+        .unwrap();
+        assert!(all.is_empty());
+    }
+
+    #[tokio::test]
+    async fn error_mid_listing_is_returned_not_a_partial_list() {
+        let mut q = pages(&[498]);
+        q.push_back(Err(crate::Error::InvalidState("dropped".into())));
+        q.push_back(Ok(vec![1, 2, 3]));
+        let r = drain_pages(|| {
+            let next = q.pop_front().unwrap();
+            async move { next }
+        })
+        .await;
+        assert!(r.is_err());
+        assert_eq!(q.len(), 1, "stops at the error");
+    }
+}

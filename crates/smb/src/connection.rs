@@ -107,7 +107,11 @@ impl Connection {
             return Err(Error::InvalidState("Already connected".into()));
         }
 
-        let mut transport = make_transport(&self.config.transport, self.config.timeout())?;
+        let mut transport = make_transport_with_io(
+            &self.config.transport,
+            self.config.timeout(),
+            self.config.io_timeouts,
+        )?;
 
         let mut actual_connect_address = self.server_address;
         if actual_connect_address.port() == 0 {
@@ -127,7 +131,50 @@ impl Connection {
         self._negotiate(transport, self.config.smb2_only_negotiate)
             .await?;
 
+        #[cfg(feature = "async")]
+        self.start_keepalive();
+
         Ok(())
+    }
+
+    /// Sends one SMB2 ECHO and waits up to `timeout` for the answer.
+    pub async fn echo(&self, timeout: std::time::Duration) -> crate::Result<()> {
+        self.handler.echo(timeout).await
+    }
+
+    /// Spawns the keep-alive task, when [`ConnectionConfig::keepalive_interval`] is set.
+    /// The task holds only a weak reference: it ends when the connection is dropped,
+    /// closed, or an ECHO fails (which also stops the connection).
+    #[cfg(feature = "async")]
+    fn start_keepalive(&self) {
+        let Some(interval) = self.config.keepalive_interval else {
+            return;
+        };
+        if interval.is_zero() {
+            return;
+        }
+        let timeout = self.config.timeout();
+        let weak = self.handler.weak();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                let Some(handler) = weak.upgrade() else {
+                    break;
+                };
+                let Some(worker) = handler.worker().cloned() else {
+                    break;
+                };
+                if worker.stopped() {
+                    break;
+                }
+                if let Err(e) = handler.echo(timeout).await {
+                    log::warn!("Keep-alive ECHO failed ({e}); stopping the connection");
+                    let _ = worker.stop().await;
+                    break;
+                }
+                log::trace!("Keep-alive ECHO answered");
+            }
+        });
     }
 
     /// Starts a new connection from an existing, connected transport.
@@ -585,6 +632,20 @@ impl ConnectionMessageHandler {
 
     pub fn worker(&self) -> Option<&Arc<WorkerImpl>> {
         self.worker.get()
+    }
+
+    /// Sends one SMB2 ECHO (connection-level, no session) and waits up to
+    /// `timeout` for the server's answer.
+    #[maybe_async]
+    pub async fn echo(&self, timeout: std::time::Duration) -> crate::Result<()> {
+        let response = self
+            .sendo_recvo(
+                OutgoingMessage::new(smb_msg::EchoRequest::default().into()),
+                ReceiveOptions::new().with_timeout(timeout),
+            )
+            .await?;
+        response.message.content.to_echo()?;
+        Ok(())
     }
 
     const SET_CREDIT_CHARGE_CMDS: &'static [Command] = &[

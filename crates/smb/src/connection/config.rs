@@ -158,6 +158,19 @@ pub struct ConnectionConfig {
     /// their respective `set_*_info` counterparts (such as [`ResourceHandle::set_info`][crate::ResourceHandle::set_info]),
     /// [`Directory::query`][crate::Directory::query] and [`Directory::watch`][crate::Directory::watch] operations.
     pub default_transaction_size: Option<u32>,
+
+    /// Bounds on single TCP receives and sends once connected.
+    /// Defaults to [`IoTimeouts::LEGACY`] (30 s, idle waits included), which tears
+    /// down a connection that is merely idle. Long-lived sessions (change notify,
+    /// a paused player) should use [`IoTimeouts::no_idle_timeout`] together with
+    /// [`keepalive_interval`][Self::keepalive_interval].
+    pub io_timeouts: IoTimeouts,
+
+    /// When set, an SMB2 ECHO is sent this often while the connection lives
+    /// (async builds only). An ECHO that fails or gets no answer within
+    /// [`timeout()`][Self::timeout] stops the connection, so every waiting and
+    /// later request fails fast with a connection error instead of hanging.
+    pub keepalive_interval: Option<Duration>,
 }
 
 impl ConnectionConfig {

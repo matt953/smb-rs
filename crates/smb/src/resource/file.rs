@@ -48,6 +48,11 @@ impl File {
     }
 
     /// Read a block of data from an opened file.
+    ///
+    /// Requests larger than the server's negotiated `max_read_size` are split into
+    /// several READs of at most that size (a server rejects a larger READ), sent
+    /// together on async builds. The result stops at the first short chunk, so
+    /// the bytes returned are always contiguous from `pos`.
     /// # Arguments
     /// * `buf` - The buffer to read the data into. A maximum of `buf.len()` bytes will be read.
     /// * `pos` - The offset in the file to read from.
@@ -77,6 +82,60 @@ impl File {
             return Ok(0);
         }
 
+        let max_read = self.handle.conn_info.negotiation.max_read_size;
+        let ranges = split_read_ranges(pos, buf.len(), max_read, self.end_of_file);
+        if ranges.len() <= 1 {
+            let len = ranges.first().map(|r| r.1).unwrap_or(buf.len());
+            return self
+                .read_one(&mut buf[..len], pos, channel, unbuffered)
+                .await;
+        }
+
+        log::debug!(
+            "Splitting a {}-byte read at {} into {} READs of at most {} bytes",
+            buf.len(),
+            pos,
+            ranges.len(),
+            max_read
+        );
+        let total: usize = ranges.iter().map(|r| r.1).sum();
+        let chunks = buf[..total].chunks_mut(max_read as usize);
+
+        #[cfg(feature = "async")]
+        let counts: Vec<usize> = {
+            let reads = chunks
+                .zip(ranges.iter())
+                .map(|(chunk, (offset, _))| self.read_one(chunk, *offset, channel, unbuffered));
+            futures_util::future::try_join_all(reads).await?
+        };
+        #[cfg(not(feature = "async"))]
+        let counts: Vec<usize> = {
+            let mut counts = Vec::with_capacity(ranges.len());
+            for (chunk, (offset, _)) in chunks.zip(ranges.iter()) {
+                let n = self.read_one(chunk, *offset, channel, unbuffered)?;
+                let short = n < chunk.len();
+                counts.push(n);
+                if short {
+                    break;
+                }
+            }
+            counts
+        };
+
+        Ok(contiguous_read_len(
+            &counts,
+            &ranges.iter().map(|r| r.1).collect::<Vec<_>>(),
+        ))
+    }
+
+    /// One READ request of at most `max_read_size` bytes.
+    async fn read_one(
+        &self,
+        buf: &mut [u8],
+        pos: u64,
+        channel: Option<u32>,
+        unbuffered: bool,
+    ) -> std::io::Result<usize> {
         log::debug!(
             "Reading up to {} bytes at offset {} from {}",
             buf.len(),
@@ -117,14 +176,14 @@ impl File {
             .content
             .to_read()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let actual_read_length = content.buffer.len();
+        let actual_read_length = content.buffer.len().min(buf.len());
         log::debug!(
             "Read {} bytes from {}.",
             actual_read_length,
             self.handle.name()
         );
 
-        buf[..actual_read_length].copy_from_slice(&content.buffer);
+        buf[..actual_read_length].copy_from_slice(&content.buffer[..actual_read_length]);
 
         Ok(actual_read_length)
     }
@@ -415,5 +474,91 @@ impl Deref for File {
 impl DerefMut for File {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.handle
+    }
+}
+
+
+/// Splits a read of `len` bytes at `pos` into READ requests of at most
+/// `max_read` bytes, clamped to `end_of_file`. `max_read == 0` (unknown) means
+/// one request. Returns `(offset, length)` pairs, contiguous from `pos`.
+pub(crate) fn split_read_ranges(
+    pos: u64,
+    len: usize,
+    max_read: u32,
+    end_of_file: u64,
+) -> Vec<(u64, usize)> {
+    if len == 0 || pos >= end_of_file {
+        return Vec::new();
+    }
+    let len = (len as u64).min(end_of_file - pos) as usize;
+    let max = if max_read == 0 { len } else { max_read as usize };
+    let mut out = Vec::with_capacity(len.div_ceil(max));
+    let mut done = 0usize;
+    while done < len {
+        let n = max.min(len - done);
+        out.push((pos + done as u64, n));
+        done += n;
+    }
+    out
+}
+
+/// Bytes usable from the start of a split read: every chunk up to and
+/// including the first one that came back short.
+pub(crate) fn contiguous_read_len(counts: &[usize], requested: &[usize]) -> usize {
+    let mut total = 0;
+    for (n, want) in counts.iter().zip(requested.iter()) {
+        total += *n;
+        if n < want {
+            break;
+        }
+    }
+    total
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::{contiguous_read_len, split_read_ranges};
+
+    #[test]
+    fn small_read_is_one_request() {
+        assert_eq!(split_read_ranges(0, 4096, 1 << 20, 1 << 30), vec![(0, 4096)]);
+    }
+
+    #[test]
+    fn five_mib_over_one_mib_max_is_five_requests() {
+        let r = split_read_ranges(100, 5 << 20, 1 << 20, 1 << 40);
+        assert_eq!(r.len(), 5);
+        assert_eq!(r[0], (100, 1 << 20));
+        assert_eq!(r[4], (100 + (4u64 << 20), 1 << 20));
+        assert!(r.iter().all(|(_, n)| *n <= 1 << 20));
+        // contiguous
+        for w in r.windows(2) {
+            assert_eq!(w[0].0 + w[0].1 as u64, w[1].0);
+        }
+    }
+
+    #[test]
+    fn uneven_tail_and_eof_clamp() {
+        // 2.5 MiB wanted, only 1.5 MiB left in the file.
+        let eof = 10_000_000u64;
+        let pos = eof - (3 << 19);
+        let r = split_read_ranges(pos, 5 << 19, 1 << 20, eof);
+        assert_eq!(r, vec![(pos, 1 << 20), (pos + (1 << 20), 1 << 19)]);
+    }
+
+    #[test]
+    fn unknown_max_is_one_request_and_past_eof_is_none() {
+        assert_eq!(split_read_ranges(0, 5 << 20, 0, 1 << 30), vec![(0, 5 << 20)]);
+        assert!(split_read_ranges(50, 10, 1 << 20, 50).is_empty());
+        assert!(split_read_ranges(0, 0, 1 << 20, 50).is_empty());
+    }
+
+    #[test]
+    fn contiguous_len_stops_at_first_short_chunk() {
+        let want = [4, 4, 4];
+        assert_eq!(contiguous_read_len(&[4, 4, 4], &want), 12);
+        assert_eq!(contiguous_read_len(&[4, 2, 4], &want), 6);
+        assert_eq!(contiguous_read_len(&[0, 4, 4], &want), 0);
+        assert_eq!(contiguous_read_len(&[4, 4], &want), 8);
     }
 }
