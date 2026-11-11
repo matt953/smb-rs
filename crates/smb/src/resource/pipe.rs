@@ -27,7 +27,17 @@ impl Pipe {
     {
         PipeRpcConnection::bind::<I>(self).await
     }
+
+    /// See [`PipeRpcConnection::bind_ndr20`].
+    pub async fn bind_ndr20<I>(self) -> crate::Result<I>
+    where
+        I: RpcInterface<PipeRpcConnection>,
+    {
+        PipeRpcConnection::bind_ndr20::<I>(self).await
+    }
 }
+
+const BIND_NAK_PREFIX: &str = "BindNak";
 
 pub struct PipeRpcConnection {
     pipe: Pipe,
@@ -49,16 +59,70 @@ impl PipeRpcConnection {
     {
         // NDR64 first (Windows), NDR20 too (Samba binds only that), and
         // bind-time feature negotiation. The first accepted one is used.
-        let tranfer_syntaxes: [DceRpcSyntaxId; 3] =
-            [NDR64_SYNTAX_ID, NDR20_SYNTAX_ID, BIND_TIME_NEGOTIATION];
-        let context_elements = Self::make_bind_contexts(I::SYNTAX_ID, &tranfer_syntaxes);
+        Self::bind_with::<I>(pipe, vec![NDR64_SYNTAX_ID, NDR20_SYNTAX_ID, BIND_TIME_NEGOTIATION]).await
+    }
 
+    /// Binds offering NDR20 alone. Older Samba (seen: 4.12) refuses the
+    /// full offer of [`Self::bind`] with a BindNak (and closes the pipe)
+    /// instead of rejecting the contexts it can't use: a caller opens the
+    /// pipe again and binds with this.
+    pub async fn bind_ndr20<I>(pipe: Pipe) -> crate::Result<I>
+    where
+        I: RpcInterface<PipeRpcConnection>,
+    {
+        Self::bind_with::<I>(pipe, vec![NDR20_SYNTAX_ID]).await
+    }
+
+    /// True for the error [`Self::bind`] returns on a BindNak.
+    pub fn is_bind_nak(error: &crate::Error) -> bool {
+        matches!(error, crate::Error::InvalidMessage(m) if m.starts_with(BIND_NAK_PREFIX))
+    }
+
+    async fn bind_with<I>(mut pipe: Pipe, tranfer_syntaxes: Vec<DceRpcSyntaxId>) -> crate::Result<I>
+    where
+        I: RpcInterface<PipeRpcConnection>,
+    {
         const START_CALL_ID: u32 = 2;
+        let last_call_id = START_CALL_ID;
+        let bind_ack = match Self::bind_once::<I>(&mut pipe, START_CALL_ID, &tranfer_syntaxes).await? {
+            Ok(bind_ack) => bind_ack,
+            Err(reason) => {
+                return Err(crate::Error::InvalidMessage(format!(
+                    "{BIND_NAK_PREFIX} ({reason}) for {} transfer syntax(es)",
+                    tranfer_syntaxes.len()
+                )));
+            }
+        };
+
+        let context_id = Self::check_bind_results(&bind_ack, &tranfer_syntaxes)?;
+
+        let syntax = tranfer_syntaxes[context_id as usize].clone();
+        log::debug!("Bound with transfer syntax {syntax}");
+        Ok(I::new(PipeRpcConnection {
+            pipe,
+            next_call_id: last_call_id + 1,
+            context_id,
+            syntax,
+            server_max_xmit_frag: bind_ack.max_xmit_frag,
+            _server_max_recv_frag: bind_ack.max_recv_frag,
+        }))
+    }
+
+    /// One bind: Ok(ack), or Err(the BindNak's reason) when the server refused it.
+    async fn bind_once<I>(
+        pipe: &mut Pipe,
+        call_id: u32,
+        transfer_syntaxes: &[DceRpcSyntaxId],
+    ) -> crate::Result<Result<DcRpcCoPktBindAck, String>>
+    where
+        I: RpcInterface<PipeRpcConnection>,
+    {
         const DEFAULT_FRAG_LIMIT: u16 = 4280;
         const NO_ASSOC_GROUP_ID: u32 = 0;
-        let bind_ack = Self::rpc_rw(
-            &mut pipe,
-            START_CALL_ID,
+        let context_elements = Self::make_bind_contexts(I::SYNTAX_ID, transfer_syntaxes);
+        let response = Self::rpc_rw(
+            pipe,
+            call_id,
             DcRpcCoPktBind {
                 max_xmit_frag: DEFAULT_FRAG_LIMIT,
                 max_recv_frag: DEFAULT_FRAG_LIMIT,
@@ -68,31 +132,15 @@ impl PipeRpcConnection {
             .into(),
         )
         .await?;
-
-        let bind_ack = match bind_ack.content() {
+        let shown = format!("{response:?}");
+        match response.into_content() {
             DcRpcCoPktResponseContent::BindAck(bind_ack) => {
                 log::debug!("Bounded to pipe with port spec {}", bind_ack.port_spec);
-                bind_ack
+                Ok(Ok(bind_ack))
             }
-            _ => {
-                return Err(crate::Error::InvalidMessage(format!(
-                    "Expected BindAck, got: {bind_ack:?}",
-                )));
-            }
-        };
-
-        let context_id = Self::check_bind_results(bind_ack, &tranfer_syntaxes)?;
-
-        let syntax = tranfer_syntaxes[context_id as usize].clone();
-        log::debug!("Bound with transfer syntax {syntax}");
-        Ok(I::new(PipeRpcConnection {
-            pipe,
-            next_call_id: START_CALL_ID + 1,
-            context_id,
-            syntax,
-            server_max_xmit_frag: bind_ack.max_xmit_frag,
-            _server_max_recv_frag: bind_ack.max_recv_frag,
-        }))
+            DcRpcCoPktResponseContent::BindNak(nak) => Ok(Err(format!("{:?}", nak.reason))),
+            _ => Err(crate::Error::InvalidMessage(format!("Expected BindAck, got: {shown}"))),
+        }
     }
 
     fn make_bind_contexts(

@@ -154,7 +154,16 @@ impl Client {
         let srvsvc_pipe_name: &str = "srvsvc";
         let srvsvc_pipe = self.open_pipe(server, srvsvc_pipe_name).await?;
 
-        let mut srvsvc_pipe: SrvSvc<_> = srvsvc_pipe.bind().await?;
+        let mut srvsvc_pipe: SrvSvc<_> = match srvsvc_pipe.bind().await {
+            Ok(bound) => bound,
+            // Older Samba refuses the full offer and closes the pipe: open it
+            // again and offer NDR20 alone.
+            Err(e) if crate::resource::PipeRpcConnection::is_bind_nak(&e) => {
+                log::debug!("srvsvc: {e}; binding again with NDR20 alone");
+                self.open_pipe(server, srvsvc_pipe_name).await?.bind_ndr20().await?
+            }
+            Err(e) => return Err(e),
+        };
         let shares = srvsvc_pipe.netr_share_enum(server).await?;
 
         Ok(shares)
